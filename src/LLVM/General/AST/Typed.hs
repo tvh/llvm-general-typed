@@ -25,10 +25,15 @@ import Data.HList
 
 import Data.Number.Binary
 
+import qualified LLVM.General.AST as L
+import qualified LLVM.General.AST.Linkage as L
+import qualified LLVM.General.AST.DataLayout as L
+import qualified LLVM.General.AST.CallingConvention as L
+import qualified LLVM.General.AST.InlineAssembly as L
+import qualified LLVM.General.AST.Visibility as L
+import qualified LLVM.General.AST.Attribute as L
 import qualified LLVM.General.AST.AddrSpace as L
-import qualified LLVM.General.AST.Type as L
 import qualified LLVM.General.AST.Float as LF
-import qualified LLVM.General.AST.Name as L
 import qualified LLVM.General.AST.Constant as LC
 import qualified LLVM.General.AST.Operand as LO
 import qualified LLVM.General.AST.Instruction as LI
@@ -86,6 +91,12 @@ instance ToUnTyped Type L.Type where
   unTyped StructureType{..} = L.StructureType False (unTyped elementTypes)
   unTyped ArrayType{..} = L.ArrayType (unTyped nArrayElements) (unTyped elementType)
 
+genSingletons [
+  ''AddrSpace,
+  ''L.FloatingPointFormat,
+  ''Type
+  ]
+
 data SomeFloat t where
   Single :: Float -> SomeFloat (FloatingPointType (U 32) L.IEEE)
   Double :: Double -> SomeFloat (FloatingPointType (U 64) L.IEEE)
@@ -139,15 +150,15 @@ instance SingI a => ToUnTyped (Operand a) LO.Operand where
   unTyped (LocalReference  n) = LO.LocalReference n
   unTyped (ConstantOperand c) = LO.ConstantOperand $ unTyped c
 
-promoteOnly [d|
-  isFloatTy :: Type -> Bool
-  isFloatTy FloatingPointType{} = True
-  isFloatTy VectorType{elementType = FloatingPointType{}} = True
-               
-  isIntTy :: Type -> Bool
-  isIntTy IntegerType{} = True
-  isIntTy VectorType{elementType = IntegerType{}} = True
+data CallableOperand t where
+  Inline :: L.InlineAssembly -> CallableOperand (FunctionType resType argTypes varArg)
+  CallableOperand :: SingI (FunctionType resType argTypes varArg) => Operand (FunctionType resType argTypes varArg) -> CallableOperand (FunctionType resType argTypes varArg)
 
+instance ToUnTyped (CallableOperand t) LO.CallableOperand where
+  unTyped (Inline inline) = Left inline
+  unTyped (CallableOperand op) = Right (unTyped op)
+
+promoteOnly [d|
   smallerIntTy :: Type -> Type -> Bool
   smallerIntTy (IntegerType b1) (IntegerType b2) = b1 < b2
   smallerIntTy v1 v2 =
@@ -183,13 +194,13 @@ promoteOnly [d|
   ptrAddrSpaceDifferent :: Type -> Type -> Bool
   ptrAddrSpaceDifferent (PointerType t1 s1) (PointerType t2 s2) = t1 == t2 && s1 /= s2
 
-  iCmpRes :: Type -> Type -> Bool
-  iCmpRes IntegerType{} (IntegerType n) = fromBinary n == 1
-  iCmpRes (VectorType n1 IntegerType{}) (VectorType n2 (IntegerType n)) = fromBinary n == 1 && n1 == n2
+  iCmpRes :: Type -> Type
+  iCmpRes IntegerType{} = IntegerType (u 1)
+  iCmpRes (VectorType n IntegerType{}) = VectorType n (IntegerType (u 1))
 
-  fCmpRes :: Type -> Type -> Bool
-  fCmpRes FloatingPointType{} (IntegerType n) = fromBinary n == 1
-  fCmpRes (VectorType n1 FloatingPointType{}) (VectorType n2 (IntegerType n)) = fromBinary n == 1 && n1 == n2
+  fCmpRes :: Type -> Type
+  fCmpRes FloatingPointType{} = IntegerType (u 1)
+  fCmpRes (VectorType n FloatingPointType{}) = VectorType n (IntegerType (u 1))
 
   selectable :: Type -> Type -> Bool
   selectable (IntegerType n) _ = fromBinary n == 1
@@ -206,116 +217,129 @@ promoteOnly [d|
       (StructureType ts) -> extractTy' (ts `index` n) ns
   |]
 
+class IsFloatTy (ty :: Type)
+instance IsFloatTy (FloatingPointType bits format)
+instance IsFloatTy (VectorType n (FloatingPointType bits format))
+
+class IsIntTy (ty :: Type)
+instance IsIntTy (IntegerType bits)
+instance IsIntTy (VectorType n (IntegerType bits))
+
+class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])] => ValidArgs (types :: [Type]) (varArg :: Bool) (args :: [*])
+instance ValidArgs '[] a '[]
+instance (SingI t, ValidArgs '[] True xs) => ValidArgs '[]        True   ((Operand t, [L.ParameterAttribute]) ': xs)
+instance (SingI t, ValidArgs ts varArg xs) => ValidArgs (t ': ts) varArg ((Operand t, [L.ParameterAttribute]) ': xs)
+
 data Instruction a where
-  Add :: (IsIntTy a ~ True) => { 
+  Add :: (IsIntTy a) => { 
       nsw :: Bool,
       nuw :: Bool,
       operand0 :: Operand a,
       operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FAdd :: (IsFloatTy a ~ True) => {
+  FAdd :: (IsFloatTy a) => {
       fastMathFlags :: LI.FastMathFlags,
       operand0 :: Operand a,
       operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Sub :: (IsIntTy a ~ True) => {
+  Sub :: (IsIntTy a) => {
       nsw :: Bool,
       nuw :: Bool,
       operand0 :: Operand a,
       operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FSub :: (IsFloatTy a ~ True) => { 
+  FSub :: (IsFloatTy a) => { 
       fastMathFlags :: LI.FastMathFlags,
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Mul :: (IsIntTy a ~ True) => { 
+  Mul :: (IsIntTy a) => { 
       nsw :: Bool, 
       nuw :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata 
     } -> Instruction a
-  FMul :: (IsFloatTy a ~ True) => { 
+  FMul :: (IsFloatTy a) => { 
       fastMathFlags :: LI.FastMathFlags,
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  UDiv :: (IsIntTy a ~ True) => { 
+  UDiv :: (IsIntTy a) => { 
       exact :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  SDiv :: (IsIntTy a ~ True) => { 
+  SDiv :: (IsIntTy a) => { 
       exact :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FDiv :: (IsFloatTy a ~ True) => { 
+  FDiv :: (IsFloatTy a) => { 
       fastMathFlags :: LI.FastMathFlags,
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  URem :: (IsIntTy a ~ True) => { 
+  URem :: (IsIntTy a) => { 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  SRem :: (IsIntTy a ~ True) => { 
+  SRem :: (IsIntTy a) => { 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FRem :: (IsFloatTy a ~ True) => { 
+  FRem :: (IsFloatTy a) => { 
       fastMathFlags :: LI.FastMathFlags,
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Shl :: (IsIntTy a ~ True) => { 
+  Shl :: (IsIntTy a) => { 
       nsw :: Bool, 
       nuw :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  LShr :: (IsIntTy a ~ True) => { 
+  LShr :: (IsIntTy a) => { 
       exact :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  AShr :: (IsIntTy a ~ True) => { 
+  AShr :: (IsIntTy a) => { 
       exact :: Bool, 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  And :: (IsIntTy a ~ True) => { 
+  And :: (IsIntTy a) => { 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Or :: (IsIntTy a ~ True) => { 
+  Or :: (IsIntTy a) => { 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Xor :: (IsIntTy a ~ True) => { 
+  Xor :: (IsIntTy a) => { 
       operand0 :: Operand a, 
       operand1 :: Operand a, 
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Alloca :: (SingI b, a ~ IntegerType b) => { 
-      numElements :: Maybe (Operand a),
+  Alloca :: (SingI a) => { 
+      numElements :: Maybe (Operand (IntegerType a)),
       alignmentA :: Word32,
       metadataAlloca :: LI.InstructionMetadata
     } -> Instruction (PointerType ty addrspace)
@@ -414,13 +438,13 @@ data Instruction a where
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  ICmp :: (SingI a, ICmpRes a b ~ True) => {
+  ICmp :: (SingI a, ICmpRes a ~ b) => {
       iPredicate :: LIP.IntegerPredicate,
       operand0' :: Operand a,
       operand1' :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  FCmp :: (SingI a, FCmpRes a b ~ True) => {
+  FCmp :: (SingI a, FCmpRes a ~ b) => {
       fpPredicate :: LFP.FloatingPointPredicate,
       operand0' :: Operand a,
       operand1' :: Operand a,
@@ -430,17 +454,15 @@ data Instruction a where
       incomingValues :: [ (Operand a, L.Name) ],
       metadata :: LI.InstructionMetadata
   } -> Instruction a
-{-
-  Call :: {
+  Call :: (ValidArgs argTypes varArg args) => {
       isTailCall :: Bool,
-      callingConvention :: CallingConvention,
-      returnAttributes :: [ParameterAttribute],
-      function :: CallableOperand,
-      arguments :: [(Operand, [ParameterAttribute])],
-      functionAttributes :: [FunctionAttribute],
+      callingConvention :: L.CallingConvention,
+      returnAttributes :: [L.ParameterAttribute],
+      function :: CallableOperand (FunctionType resType argTypes varArg),
+      arguments :: HList args,
+      functionAttributes :: [L.FunctionAttribute],
       metadata :: LI.InstructionMetadata
-  } -> Instruction a
--}
+  } -> Instruction resType
   Select :: (SingI a, Selectable a b ~ True) => { 
       condition' :: Operand a,
       trueValue :: Operand b,
@@ -454,12 +476,12 @@ data Instruction a where
       metadata :: LI.InstructionMetadata 
     } -> Instruction a
 -}
-  ExtractElement :: (SingI n, SingI b, IsIntTy b ~ True) => { 
+  ExtractElement :: (SingI n, SingI b, IsIntTy b) => { 
       vectorExtract :: Operand (VectorType n a),
       indexExtract :: Operand b,
       metadata :: LI.InstructionMetadata 
     } -> Instruction a
-  InsertElement :: (SingI a, SingI b, IsIntTy b ~ True) => { 
+  InsertElement :: (SingI a, SingI b, IsIntTy b) => { 
       vectorInsert :: Operand (VectorType n a),
       elementE :: Operand a,
       indexInsert :: Operand b,
@@ -483,8 +505,7 @@ data Instruction a where
       metadata :: LI.InstructionMetadata
     } -> Instruction a
 {-
-  LandingPad :: { 
-      type' :: Type,
+  LandingPad :: {
       personalityFunction :: Operand,
       cleanup :: Bool,
       clauses :: [LandingPadClause],
@@ -564,6 +585,7 @@ instance SingI a => ToUnTyped (Instruction a) LI.Instruction where
   unTyped x@Phi{..}           =
     let t = fromSing $ singByProxy x
     in LI.Phi (unTyped t) (unTyped incomingValues) metadata
+  unTyped Call{..}            = LI.Call isTailCall callingConvention returnAttributes (unTyped function) (unTyped arguments) functionAttributes metadata
   unTyped Select{..}          = LI.Select (unTyped condition') (unTyped trueValue) (unTyped falseValue) metadata
   unTyped ExtractElement{..}  = LI.ExtractElement (unTyped vectorExtract) (unTyped indexExtract) metadata
   unTyped InsertElement{..}   = LI.InsertElement (unTyped vectorInsert) (unTyped elementE) (unTyped indexInsert) metadataVect
@@ -575,67 +597,153 @@ instance SingI a => ToUnTyped (Instruction a) LI.Instruction where
     let idxs = fromSing $ singByProxy indices'
     in LI.InsertValue (unTyped aggregateV) (unTyped elementV) (unTyped idxs) metadata
 
-data Terminator where
+data Terminator a where
   Ret :: (SingI a) => { 
       returnOperand :: Maybe (Operand a),
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
   CondBr :: (SingI a) => { 
       condition :: Operand a, 
       trueDest :: L.Name, 
       falseDest :: L.Name,
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
   Br :: { 
       dest :: L.Name,
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
   Switch :: (SingI a) => {
       operand' :: Operand a,
       defaultDest :: L.Name,
       dests :: [(Constant a, L.Name)],
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
   IndirectBr :: (SingI a) => {
       operand' :: Operand a,
       possibleDests :: [L.Name],
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
-{-
-  Invoke :: {
-      callingConvention' :: CallingConvention,
-      returnAttributes' :: [ParameterAttribute],
-      function' :: CallableOperand,
-      arguments' :: [(Operand, [ParameterAttribute])],
-      functionAttributes' :: [FunctionAttribute],
-      returnDest :: Name,
-      exceptionDest :: Name,
-      metadata' :: InstructionMetadata
-    } -> Terminator
--}
+    } -> Terminator VoidType
+  Invoke :: (ValidArgs argTypes varArg args) => {
+      callingConvention' :: L.CallingConvention,
+      returnAttributes' :: [L.ParameterAttribute],
+      function' :: CallableOperand (FunctionType resType argTypes varArg),
+      arguments' :: HList args,
+      functionAttributes' :: [L.FunctionAttribute],
+      returnDest :: L.Name,
+      exceptionDest :: L.Name,
+      metadata'' :: LI.InstructionMetadata
+    } -> Terminator resType
   Resume :: (SingI a) => {
       operand' :: Operand a,
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
   Unreachable :: {
       metadata' :: LI.InstructionMetadata
-    } -> Terminator
+    } -> Terminator VoidType
 
-instance ToUnTyped Terminator LI.Terminator where
+instance ToUnTyped (Terminator a) LI.Terminator where
   unTyped Ret{..} = LI.Ret (unTyped returnOperand) metadata'
   unTyped CondBr{..} = LI.CondBr (unTyped condition) trueDest falseDest metadata'
   unTyped Br{..} = LI.Br dest metadata'
   unTyped Switch{..} = LI.Switch (unTyped operand') defaultDest (unTyped dests) metadata'
   unTyped IndirectBr{..} = LI.IndirectBr (unTyped operand') possibleDests metadata'
+  unTyped Invoke{..} = LI.Invoke callingConvention' returnAttributes' (unTyped function') (unTyped arguments') functionAttributes' returnDest exceptionDest metadata''
   unTyped Resume{..} = LI.Resume (unTyped operand') metadata'
   unTyped Unreachable{..} = LI.Unreachable metadata'  
 
-instance ToUnTyped a b => ToUnTyped (LI.Named a) (LI.Named b) where
-  unTyped (n LI.:= x) = n LI.:= unTyped x
-  unTyped (LI.Do x)   = LI.Do $ unTyped x
+instance Functor LI.Named where
+  fmap f (LI.Do x)   = LI.Do (f x)
+  fmap f (n LI.:= x) = n LI.:= (f x)
   
-genSingletons [
-  ''AddrSpace,
-  ''L.FloatingPointFormat,
-  ''Type
-  ]
+data BasicBlock where
+  BasicBlock :: (ToUnTyped (HList xs) [LI.Named LI.Instruction]) => {
+    blockName :: L.Name,
+    blockInstructions :: HList xs,
+    blockTerminator :: LI.Named (Terminator a)
+  } -> BasicBlock
+
+instance ToUnTyped BasicBlock L.BasicBlock where
+  unTyped BasicBlock{..} = L.BasicBlock blockName (unTyped blockInstructions) (unTyped blockTerminator)
+
+data Parameter (a :: Type) where
+  Parameter :: (SingI a) => {
+    parameterName :: L.Name,
+    parameterAttributes :: [L.ParameterAttribute]
+  } -> Parameter a
+
+instance ToUnTyped (Parameter a) L.Parameter where
+  unTyped x@Parameter{..} =
+    let t = fromSing $ singByProxy x
+    in L.Parameter (unTyped t) parameterName parameterAttributes
+
+data Global (a :: Type) where
+  GlobalVariable :: SingI a => {
+    name :: L.Name,
+    linkage :: L.Linkage,
+    visibility :: L.Visibility,
+    isThreadLocal :: Bool,
+    addrSpace :: AddrSpace,
+    hasUnnamedAddr :: Bool,
+    isConstant :: Bool,
+    initializer :: Maybe (Constant a),
+    section :: Maybe String,
+    globalAlignment :: Word32
+  } -> Global a
+  GlobalAlias :: SingI a => {
+    name :: L.Name,
+    linkage :: L.Linkage,
+    visibility :: L.Visibility,
+    aliasee :: Constant a
+  } -> Global a
+  Function :: (ToUnTyped (HList params) [L.Parameter], InnerTypes params ~ args) => {
+    linkage' :: L.Linkage,
+    visibility' :: L.Visibility,
+    callingConventionF :: L.CallingConvention,
+    returnAttributesF :: [L.ParameterAttribute],
+    name' :: L.Name,
+    parameters :: HList params,
+    functionAttributesF :: [L.FunctionAttribute],
+    section' :: Maybe String,
+    globalAlignment' :: Word32,
+    garbageCollectorName :: Maybe String,
+    basicBlocks :: [BasicBlock]
+  } -> Global (FunctionType a args varArg)
+
+instance SingI a => ToUnTyped (Global a) L.Global where
+  unTyped x@GlobalVariable{..} =
+    let t = fromSing $ singByProxy x
+    in L.GlobalVariable name linkage visibility isThreadLocal (unTyped addrSpace) hasUnnamedAddr isConstant (unTyped t) (unTyped initializer) section globalAlignment
+  unTyped x@GlobalAlias{..} =
+    let t = fromSing $ singByProxy x
+    in L.GlobalAlias name linkage visibility (unTyped t) (unTyped aliasee)
+  unTyped x@Function{..} =
+    let FunctionType retType _ varArg = fromSing $ singByProxy x
+    in L.Function linkage' visibility' callingConventionF returnAttributesF (unTyped retType) name' (unTyped parameters, varArg) functionAttributesF section' globalAlignment' garbageCollectorName (unTyped basicBlocks)
+
+data Definition where
+  GlobalDefinition :: ToUnTyped (Global a) L.Global => Global a -> Definition
+  TypeDefinition :: (SingI a) => L.Name -> Proxy (a :: Maybe Type) -> Definition
+  MetadataNodeDefinition :: ToUnTyped (HList defs) [Maybe LO.Operand] => LO.MetadataNodeID -> HList defs -> Definition
+  NamedMetadataDefinition :: String -> [LO.MetadataNodeID] -> Definition
+  ModuleInlineAssembly :: String -> Definition
+
+instance ToUnTyped Definition L.Definition where
+  unTyped (GlobalDefinition g) = L.GlobalDefinition (unTyped g)
+  unTyped (TypeDefinition name t) =
+    let mTy = fromSing $ singByProxy t
+    in L.TypeDefinition name (unTyped mTy)
+  unTyped (MetadataNodeDefinition nodeId defs) = L.MetadataNodeDefinition nodeId (unTyped defs)
+  unTyped (NamedMetadataDefinition name ids) = L.NamedMetadataDefinition name ids
+  unTyped (ModuleInlineAssembly assembly) = L.ModuleInlineAssembly assembly
+
+data Module = 
+  Module {
+    moduleName :: String,
+    -- | a 'DataLayout', if specified, must match that of the eventual code generator
+    moduleDataLayout :: Maybe L.DataLayout,
+    moduleTargetTriple :: Maybe String,
+    moduleDefinitions :: [Definition]
+  } 
+
+instance ToUnTyped Module L.Module where
+  unTyped Module{..} = L.Module moduleName moduleDataLayout moduleTargetTriple (unTyped moduleDefinitions)
