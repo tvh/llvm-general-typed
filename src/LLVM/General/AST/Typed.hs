@@ -78,8 +78,9 @@ data Type
   | FloatingPointType { typeBits :: Binary, floatingPointFormat :: L.FloatingPointFormat }
   | FunctionType { resultType :: Type, argumentTypes :: [Type], isVarArg :: Bool }
   | VectorType { nVectorElements :: Binary, elementType :: Type }
-  | StructureType { elementTypes :: [Type] }
+  | StructureType { isPacked :: Bool, elementTypes :: [Type] }
   | ArrayType { nArrayElements :: Binary, elementType :: Type }
+  | MetadataType
   
 instance ToUnTyped Type L.Type where
   unTyped VoidType = L.VoidType
@@ -88,8 +89,9 @@ instance ToUnTyped Type L.Type where
   unTyped FloatingPointType{..} = L.FloatingPointType (unTyped typeBits) floatingPointFormat
   unTyped FunctionType{..} = L.FunctionType (unTyped resultType) (unTyped argumentTypes) isVarArg
   unTyped VectorType{..} = L.VectorType (unTyped nVectorElements) (unTyped elementType)
-  unTyped StructureType{..} = L.StructureType False (unTyped elementTypes)
+  unTyped StructureType{..} = L.StructureType isPacked (unTyped elementTypes)
   unTyped ArrayType{..} = L.ArrayType (unTyped nArrayElements) (unTyped elementType)
+  unTyped MetadataType = L.MetadataType
 
 genSingletons [
   ''AddrSpace,
@@ -112,7 +114,7 @@ data Constant (a :: Type) where
     -> Constant a
   Null :: Constant a
   Struct :: (InnerTypes xs ~ a, ToUnTyped (HList xs) [LC.Constant]) => { structName :: Maybe L.Name, memberValuesS :: HList xs }
-    -> Constant (StructureType a)
+    -> Constant (StructureType packed a)
   Array :: SingI a => { memberValuesA :: Vect n (Constant a) }
     -> Constant (ArrayType n a)
   Vector :: SingI a => { memberValuesV :: Vect n (Constant a) }
@@ -191,6 +193,14 @@ promoteOnly [d|
         VectorType n2 IntegerType{} = v2
     in n1 == n2
 
+  bitSize :: Type -> Binary
+  bitSize t =
+    case t of
+      VoidType            -> toBinary 0
+      IntegerType{}       -> typeBits t
+      FloatingPointType{} -> typeBits t
+      VectorType{..}      -> toBinary (fromBinary nVectorElements * fromBinary (bitSize elementType))
+
   ptrAddrSpaceDifferent :: Type -> Type -> Bool
   ptrAddrSpaceDifferent (PointerType t1 s1) (PointerType t2 s2) = t1 == t2 && s1 /= s2
 
@@ -214,7 +224,7 @@ promoteOnly [d|
   extractTy' t (n:ns) =
     case t of
       (ArrayType n1 t') -> if n1 > n then extractTy' t' ns else error "array out of bounds"
-      (StructureType ts) -> extractTy' (ts `index` n) ns
+      (StructureType  _ ts) -> extractTy' (ts `index` n) ns
   |]
 
 class IsFloatTy (ty :: Type)
@@ -429,8 +439,7 @@ data Instruction a where
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
--- TODO: TypeCheck
-  BitCast :: (SingI a) => {
+  BitCast :: (SingI a, bitSize a ~ bitSize b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
@@ -739,7 +748,6 @@ instance ToUnTyped Definition L.Definition where
 data Module = 
   Module {
     moduleName :: String,
-    -- | a 'DataLayout', if specified, must match that of the eventual code generator
     moduleDataLayout :: Maybe L.DataLayout,
     moduleTargetTriple :: Maybe String,
     moduleDefinitions :: [Definition]
