@@ -16,14 +16,14 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module LLVM.General.AST.Typed where
 
-import Data.Singletons
+import Data.Singletons.Prelude
+import Data.Singletons.TypeLits
 import Data.Singletons.TH
-import Data.Promotion.Prelude hiding (Nat)
 import Data.Word
 
 import Data.HList
 
-import Data.Number.Binary
+--import Data.Number.Binary
 
 import qualified LLVM.General.AST as L
 import qualified LLVM.General.AST.Linkage as L
@@ -44,9 +44,6 @@ import qualified LLVM.General.AST.RMWOperation as LR
 class ToUnTyped a b where
   unTyped :: a -> b
 
-instance Integral a => ToUnTyped Binary a where
-  unTyped = fromBinary
-
 instance (Functor f, ToUnTyped a b) => ToUnTyped (f a) (f b) where
   unTyped = fmap unTyped
 
@@ -58,39 +55,39 @@ instance ToUnTyped (HList '[]) [b] where
 instance (ToUnTyped (HList xs) [b], ToUnTyped a b) => ToUnTyped (HList (a ': xs)) [b] where
   unTyped (HCons x xs) = unTyped x:unTyped xs
 
-data Vect (n::Binary) a where
-  VNil  :: Vect Zero a
-  VCons :: a -> Vect n a -> Vect (Succ n) a
+data Vect (n::Nat) a where
+  VNil  :: Vect 0 a
+  VCons :: a -> Vect n a -> Vect (n :+ 1) a
 
 instance ToUnTyped a b => ToUnTyped (Vect n a) [b] where
   unTyped VNil = []
   unTyped (VCons x xs) = unTyped x:unTyped xs
 
-data AddrSpace = AddrSpace Binary
+data AddrSpace a = AddrSpace a
 
-instance ToUnTyped AddrSpace L.AddrSpace where
-  unTyped (AddrSpace n) = L.AddrSpace (unTyped n)
+instance Integral a => ToUnTyped (AddrSpace a) L.AddrSpace where
+  unTyped (AddrSpace n) = L.AddrSpace (fromIntegral n)
 
-data Type
+data Type a
   = VoidType
-  | IntegerType { typeBits :: Binary }
-  | PointerType { pointerReferent :: Type, pointerAddrSpace :: AddrSpace }
-  | FloatingPointType { typeBits :: Binary, floatingPointFormat :: L.FloatingPointFormat }
-  | FunctionType { resultType :: Type, argumentTypes :: [Type], isVarArg :: Bool }
-  | VectorType { nVectorElements :: Binary, elementType :: Type }
-  | StructureType { isPacked :: Bool, elementTypes :: [Type] }
-  | ArrayType { nArrayElements :: Binary, elementType :: Type }
+  | IntegerType { typeBits :: a }
+  | PointerType { pointerReferent :: Type a, pointerAddrSpace :: AddrSpace a }
+  | FloatingPointType { typeBits :: a, floatingPointFormat :: L.FloatingPointFormat }
+  | FunctionType { resultType :: Type a, argumentTypes :: [Type a], isVarArg :: Bool }
+  | VectorType { nVectorElements :: a, elementType :: Type a }
+  | StructureType { isPacked :: Bool, elementTypes :: [Type a] }
+  | ArrayType { nArrayElements :: a, elementType :: Type a }
   | MetadataType
   
-instance ToUnTyped Type L.Type where
+instance ToUnTyped (Type Integer) L.Type where
   unTyped VoidType = L.VoidType
-  unTyped IntegerType{..} = L.IntegerType $ unTyped typeBits
+  unTyped IntegerType{..} = L.IntegerType $ fromInteger typeBits
   unTyped PointerType{..} = L.PointerType (unTyped pointerReferent) (unTyped pointerAddrSpace)
-  unTyped FloatingPointType{..} = L.FloatingPointType (unTyped typeBits) floatingPointFormat
+  unTyped FloatingPointType{..} = L.FloatingPointType (fromInteger typeBits) floatingPointFormat
   unTyped FunctionType{..} = L.FunctionType (unTyped resultType) (unTyped argumentTypes) isVarArg
-  unTyped VectorType{..} = L.VectorType (unTyped nVectorElements) (unTyped elementType)
+  unTyped VectorType{..} = L.VectorType (fromInteger nVectorElements) (unTyped elementType)
   unTyped StructureType{..} = L.StructureType isPacked (unTyped elementTypes)
-  unTyped ArrayType{..} = L.ArrayType (unTyped nArrayElements) (unTyped elementType)
+  unTyped ArrayType{..} = L.ArrayType (fromInteger nArrayElements) (unTyped elementType)
   unTyped MetadataType = L.MetadataType
 
 genSingletons [
@@ -100,14 +97,14 @@ genSingletons [
   ]
 
 data SomeFloat t where
-  Single :: Float -> SomeFloat (FloatingPointType (U 32) L.IEEE)
-  Double :: Double -> SomeFloat (FloatingPointType (U 64) L.IEEE)
+  Single :: Float -> SomeFloat (FloatingPointType 32 L.IEEE)
+  Double :: Double -> SomeFloat (FloatingPointType 64 L.IEEE)
 
 type family InnerTypes a where
   InnerTypes '[] = '[]
   InnerTypes (c a ': xs) = a ': InnerTypes xs
 
-data Constant (a :: Type) where
+data Constant a where
   Int :: { integerValue :: Integer }
     -> Constant (IntegerType n)
   Float :: (a ~ FloatingPointType b c) => { floatValue :: SomeFloat a }
@@ -126,7 +123,7 @@ data Constant (a :: Type) where
 instance SingI a => ToUnTyped (Constant a) LC.Constant where
   unTyped x@Int{..} =
     let IntegerType n = fromSing $ singByProxy x
-    in LC.Int (unTyped n) integerValue
+    in LC.Int (fromInteger n) integerValue
   unTyped (Float x) =
     LC.Float $ case x of
       Single f -> LF.Single f
@@ -144,7 +141,7 @@ instance SingI a => ToUnTyped (Constant a) LC.Constant where
   unTyped (GlobalReference name) =
     LC.GlobalReference name
 
-data Operand (a::Type) where
+data Operand a where
   LocalReference :: L.Name -> Operand a
   ConstantOperand :: Constant a -> Operand a
 
@@ -161,7 +158,7 @@ instance ToUnTyped (CallableOperand t) LO.CallableOperand where
   unTyped (CallableOperand op) = Right (unTyped op)
 
 promoteOnly [d|
-  smallerIntTy :: Type -> Type -> Bool
+  smallerIntTy :: Type Nat -> Type Nat -> Bool
   smallerIntTy (IntegerType b1) (IntegerType b2) = b1 < b2
   smallerIntTy v1 v2 =
     let VectorType n1 t1 = v1
@@ -170,7 +167,7 @@ promoteOnly [d|
         IntegerType b2 = t2
     in n1 == n2 && b1 < b2
 
-  smallerFloatTy :: Type -> Type -> Bool
+  smallerFloatTy :: Type Nat -> Type Nat -> Bool
   smallerFloatTy (FloatingPointType b1 _) (FloatingPointType b2 _) = b1 < b2
   smallerFloatTy v1 v2 =
     let VectorType n1 t1 = v1
@@ -179,47 +176,51 @@ promoteOnly [d|
         FloatingPointType b2 _ = t2
     in n1 == n2 && b1 < b2
 
-  intFpCast :: Type -> Type -> Bool
+  intFpCast :: Type Nat -> Type Nat -> Bool
   intFpCast IntegerType{} FloatingPointType{} = True
   intFpCast v1 v2 =
     let VectorType n1 IntegerType{}       = v1
         VectorType n2 FloatingPointType{} = v2
     in n1 == n2
 
-  ptrIntCast :: Type -> Type -> Bool
+  ptrIntCast :: Type Nat -> Type Nat -> Bool
   ptrIntCast PointerType{} IntegerType{} = True
   ptrIntCast v1 v2 =
     let VectorType n1 PointerType{} = v1
         VectorType n2 IntegerType{} = v2
     in n1 == n2
 
-  bitSize :: Type -> Binary
+  bitSize :: Type Nat -> Nat
   bitSize t =
     case t of
-      VoidType            -> toBinary 0
+      VoidType            -> 0
       IntegerType{}       -> typeBits t
       FloatingPointType{} -> typeBits t
-      VectorType{..}      -> toBinary (fromBinary nVectorElements * fromBinary (bitSize elementType))
+      VectorType{..}      -> nVectorElements * bitSize elementType
 
-  ptrAddrSpaceDifferent :: Type -> Type -> Bool
+  ptrAddrSpaceDifferent :: Type Nat -> Type Nat -> Bool
   ptrAddrSpaceDifferent (PointerType t1 s1) (PointerType t2 s2) = t1 == t2 && s1 /= s2
 
-  iCmpRes :: Type -> Type
-  iCmpRes IntegerType{} = IntegerType (u 1)
-  iCmpRes (VectorType n IntegerType{}) = VectorType n (IntegerType (u 1))
+  iCmpRes :: Type Nat -> Type Nat
+  iCmpRes IntegerType{} = IntegerType 1
+  iCmpRes (VectorType n IntegerType{}) = VectorType n (IntegerType 1)
 
-  fCmpRes :: Type -> Type
-  fCmpRes FloatingPointType{} = IntegerType (u 1)
-  fCmpRes (VectorType n FloatingPointType{}) = VectorType n (IntegerType (u 1))
+  fCmpRes :: Type Nat -> Type Nat
+  fCmpRes FloatingPointType{} = IntegerType 1
+  fCmpRes (VectorType n FloatingPointType{}) = VectorType n (IntegerType 1)
 
-  selectable :: Type -> Type -> Bool
-  selectable (IntegerType n) _ = fromBinary n == 1
-  selectable (VectorType n1 (IntegerType n)) (VectorType n2 _) = fromBinary n == 1 && n1 == n2
-
-  extractTy :: Type -> [Binary] -> Type
+  selectable :: Type Nat -> Type Nat -> Bool
+  selectable (IntegerType 1) _ = True
+  selectable (VectorType n1 (IntegerType 1)) (VectorType n2 _) = n1 == n2
+ 
+  index :: [a] -> Nat -> a
+  index (x:_) 0 = x
+  index (_:xs) n = index xs (n - 1)
+  
+  extractTy :: Type Nat -> [Nat] -> Type Nat
   extractTy t ns@(_:_) = extractTy' t ns
 
-  extractTy' :: Type -> [Binary] -> Type
+  extractTy' :: Type Nat -> [Nat] -> Type Nat
   extractTy' t [] = t
   extractTy' t (n:ns) =
     case t of
@@ -227,15 +228,15 @@ promoteOnly [d|
       (StructureType  _ ts) -> extractTy' (ts `index` n) ns
   |]
 
-class IsFloatTy (ty :: Type)
+class IsFloatTy (ty :: Type Nat)
 instance IsFloatTy (FloatingPointType bits format)
 instance IsFloatTy (VectorType n (FloatingPointType bits format))
 
-class IsIntTy (ty :: Type)
+class IsIntTy (ty :: Type Nat)
 instance IsIntTy (IntegerType bits)
 instance IsIntTy (VectorType n (IntegerType bits))
 
-class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])] => ValidArgs (types :: [Type]) (varArg :: Bool) (args :: [*])
+class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])] => ValidArgs (types :: [Type Nat]) (varArg :: Bool) (args :: [*])
 instance ValidArgs '[] a '[]
 instance (SingI t, ValidArgs '[] True xs) => ValidArgs '[]        True   ((Operand t, [L.ParameterAttribute]) ': xs)
 instance (SingI t, ValidArgs ts varArg xs) => ValidArgs (t ': ts) varArg ((Operand t, [L.ParameterAttribute]) ': xs)
@@ -496,10 +497,10 @@ data Instruction a where
       indexInsert :: Operand b,
       metadataVect :: LI.InstructionMetadata
     } -> Instruction (VectorType n a)
-  ShuffleVector :: (SingI a, SingI n, SingI m, u32 ~ U 32, SingI u32) => { 
+  ShuffleVector :: (SingI a, SingI n, SingI m) => { 
       operand0'' :: Operand (VectorType n a),
       operand1'' :: Operand (VectorType n a),
-      mask :: Constant (VectorType m (IntegerType u32)),
+      mask :: Constant (VectorType m (IntegerType 32)),
       metadataVect :: LI.InstructionMetadata
     } -> Instruction (VectorType m a)
   ExtractValue :: (SingI a, SingI idxs, ExtractTy a idxs ~ b) => { 
@@ -601,10 +602,10 @@ instance SingI a => ToUnTyped (Instruction a) LI.Instruction where
   unTyped ShuffleVector{..}   = LI.ShuffleVector (unTyped operand0'') (unTyped operand1'') (unTyped mask) metadataVect
   unTyped ExtractValue{..}    =
     let idxs = fromSing $ singByProxy indices'
-    in LI.ExtractValue (unTyped aggregateE) (unTyped idxs) metadata
+    in LI.ExtractValue (unTyped aggregateE) (map fromInteger idxs) metadata
   unTyped InsertValue{..}     =
     let idxs = fromSing $ singByProxy indices'
-    in LI.InsertValue (unTyped aggregateV) (unTyped elementV) (unTyped idxs) metadata
+    in LI.InsertValue (unTyped aggregateV) (unTyped elementV) (map fromInteger idxs) metadata
 
 data Terminator a where
   Ret :: (SingI a) => { 
@@ -674,7 +675,7 @@ data BasicBlock where
 instance ToUnTyped BasicBlock L.BasicBlock where
   unTyped BasicBlock{..} = L.BasicBlock blockName (unTyped blockInstructions) (unTyped blockTerminator)
 
-data Parameter (a :: Type) where
+data Parameter (a :: Type Nat) where
   Parameter :: (SingI a) => {
     parameterName :: L.Name,
     parameterAttributes :: [L.ParameterAttribute]
@@ -685,13 +686,13 @@ instance ToUnTyped (Parameter a) L.Parameter where
     let t = fromSing $ singByProxy x
     in L.Parameter (unTyped t) parameterName parameterAttributes
 
-data Global (a :: Type) where
+data Global (a :: Type Nat) where
   GlobalVariable :: SingI a => {
     name :: L.Name,
     linkage :: L.Linkage,
     visibility :: L.Visibility,
     isThreadLocal :: Bool,
-    addrSpace :: AddrSpace,
+    addrSpace :: AddrSpace Word32,
     hasUnnamedAddr :: Bool,
     isConstant :: Bool,
     initializer :: Maybe (Constant a),
@@ -731,7 +732,7 @@ instance SingI a => ToUnTyped (Global a) L.Global where
 
 data Definition where
   GlobalDefinition :: ToUnTyped (Global a) L.Global => Global a -> Definition
-  TypeDefinition :: (SingI a) => L.Name -> Proxy (a :: Maybe Type) -> Definition
+  TypeDefinition :: (SingI a) => L.Name -> Proxy (a :: Maybe (Type Nat)) -> Definition
   MetadataNodeDefinition :: ToUnTyped (HList defs) [Maybe LO.Operand] => LO.MetadataNodeID -> HList defs -> Definition
   NamedMetadataDefinition :: String -> [LO.MetadataNodeID] -> Definition
   ModuleInlineAssembly :: String -> Definition
