@@ -12,6 +12,7 @@ data Binary
   = Zero  
   -- | A natural number 
   | Pos Binary1
+  deriving Show
 
 -- | A binary representation of natural numbers which starts with the least
 --   significant bit.
@@ -23,6 +24,7 @@ data Binary1
   | O Binary1 
   -- | A one bit
   | I Binary1
+  deriving Show
 
 genSingletons [
   ''Binary,
@@ -50,7 +52,7 @@ promote [d|
 
   divmod n m =
     case m > n of
-      True  -> (0,m)
+      True  -> (0,n)
       False ->
         let (n',m') = divmod (n - m) m
         in (n' + 1,m')
