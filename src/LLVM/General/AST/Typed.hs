@@ -736,6 +736,54 @@ instance SingI a => ToUnTyped (Global a) L.Global where
     let FunctionType retType _ varArg = fromSing $ singByProxy x
     in L.Function linkage' visibility' callingConventionF returnAttributesF (unTyped retType) name' (unTyped parameters, varArg) functionAttributesF section' globalAlignment' garbageCollectorName (unTyped basicBlocks)
 
+-- | helper for making 'GlobalVariable's
+globalVariableDefaults :: SingI a => Global a
+globalVariableDefaults =
+  GlobalVariable {
+  name = error "global variable name not defined",
+  linkage = L.External,
+  visibility = L.Default,
+  isThreadLocal = False,
+  addrSpace = AddrSpace 0,
+  hasUnnamedAddr = False,
+  isConstant = False,
+  initializer = Nothing,
+  section = Nothing,
+  globalAlignment = 0
+  }
+
+-- | helper for making 'GlobalAlias's
+globalAliasDefaults :: SingI a => Global a
+globalAliasDefaults =
+  GlobalAlias {
+    name = error "global alias name not defined",
+    linkage = L.External,
+    visibility = L.Default,
+    aliasee = error "global alias aliasee not defined"
+  }
+
+-- | helper for making 'Function's
+functionDefaults
+  :: forall a params args varArg. (
+    params ~ '[]
+  , ToUnTyped (HList params) [L.Parameter]
+  , InnerTypes params ~ args
+  ) => Global (FunctionType a args varArg)
+functionDefaults =
+  Function {
+    linkage' = L.External,
+    visibility' = L.Default,
+    callingConventionF = L.C,
+    returnAttributesF = [],
+    name' = error "function name not defined",
+    parameters = HNil,
+    functionAttributesF = [],
+    section' = Nothing,
+    globalAlignment' = 0,
+    garbageCollectorName = Nothing,
+    basicBlocks = []
+  }
+
 data Definition where
   GlobalDefinition :: ToUnTyped (Global a) L.Global => Global a -> Definition
   TypeDefinition :: (SingI a) => L.Name -> Proxy (a :: Maybe (Type Nat)) -> Definition
