@@ -158,38 +158,6 @@ instance ToUnTyped (CallableOperand t) LO.CallableOperand where
   unTyped (CallableOperand op) = Right (unTyped op)
 
 promoteOnly [d|
-  smallerIntTy :: Type Nat -> Type Nat -> Bool
-  smallerIntTy (IntegerType b1) (IntegerType b2) = b1 < b2
-  smallerIntTy v1 v2 =
-    let VectorType n1 t1 = v1
-        VectorType n2 t2 = v2
-        IntegerType b1 = t1
-        IntegerType b2 = t2
-    in n1 == n2 && b1 < b2
-
-  smallerFloatTy :: Type Nat -> Type Nat -> Bool
-  smallerFloatTy (FloatingPointType b1 _) (FloatingPointType b2 _) = b1 < b2
-  smallerFloatTy v1 v2 =
-    let VectorType n1 t1 = v1
-        VectorType n2 t2 = v2
-        FloatingPointType b1 _ = t1
-        FloatingPointType b2 _ = t2
-    in n1 == n2 && b1 < b2
-
-  intFpCast :: Type Nat -> Type Nat -> Bool
-  intFpCast IntegerType{} FloatingPointType{} = True
-  intFpCast v1 v2 =
-    let VectorType n1 IntegerType{}       = v1
-        VectorType n2 FloatingPointType{} = v2
-    in n1 == n2
-
-  ptrIntCast :: Type Nat -> Type Nat -> Bool
-  ptrIntCast PointerType{} IntegerType{} = True
-  ptrIntCast v1 v2 =
-    let VectorType n1 PointerType{} = v1
-        VectorType n2 IntegerType{} = v2
-    in n1 == n2
-
   bitSize :: Type Nat -> Nat
   bitSize t =
     case t of
@@ -198,9 +166,6 @@ promoteOnly [d|
       FloatingPointType{} -> typeBits t
       VectorType{..}      -> nVectorElements * bitSize elementType
 
-  ptrAddrSpaceDifferent :: Type Nat -> Type Nat -> Bool
-  ptrAddrSpaceDifferent (PointerType t1 s1) (PointerType t2 s2) = t1 == t2 && s1 /= s2
-
   iCmpRes :: Type Nat -> Type Nat
   iCmpRes IntegerType{} = IntegerType 1
   iCmpRes (VectorType n IntegerType{}) = VectorType n (IntegerType 1)
@@ -208,10 +173,6 @@ promoteOnly [d|
   fCmpRes :: Type Nat -> Type Nat
   fCmpRes FloatingPointType{} = IntegerType 1
   fCmpRes (VectorType n FloatingPointType{}) = VectorType n (IntegerType 1)
-
-  selectable :: Type Nat -> Type Nat -> Bool
-  selectable (IntegerType 1) _ = True
-  selectable (VectorType n1 (IntegerType 1)) (VectorType n2 _) = n1 == n2
  
   index :: [a] -> Nat -> a
   index (x:_) 0 = x
@@ -227,6 +188,29 @@ promoteOnly [d|
       (ArrayType n1 t') -> if n1 > n then extractTy' t' ns else error "array out of bounds"
       (StructureType  _ ts) -> extractTy' (ts `index` n) ns
   |]
+
+class SmallerIntTy (a :: Type Nat) (b :: Type Nat)
+instance ((b1 :< b2) ~ True) => SmallerIntTy (IntegerType b1) (IntegerType b2)
+instance ((b1 :< b2) ~ True) => SmallerIntTy (VectorType n (IntegerType b1)) (VectorType n (IntegerType b2))
+
+class SmallerFloatTy (a :: Type Nat) (b :: Type Nat)
+instance ((b1 :< b2) ~ True) => SmallerFloatTy (FloatingPointType b1 f1) (FloatingPointType b2 f2)
+instance ((b1 :< b2) ~ True) => SmallerFloatTy (VectorType n (FloatingPointType b1 f1)) (VectorType n (FloatingPointType b2 f2))
+
+class IntFpCast (a :: Type Nat) (b :: Type Nat)
+instance IntFpCast (IntegerType n1) (FloatingPointType n2 f)
+instance IntFpCast (VectorType n (IntegerType n1)) (VectorType n (FloatingPointType n2 f))
+
+class PtrAddrSpaceDifferent (a :: Type Nat) (b :: Type Nat)
+instance ((s1 :/= s2) ~ True) => PtrAddrSpaceDifferent (PointerType t s1) (PointerType t s2)
+
+class PtrIntCast (a :: Type Nat) (b :: Type Nat)
+instance PtrIntCast (PointerType t s) (IntegerType n)
+instance PtrIntCast (VectorType n (PointerType t s)) (VectorType n2 (IntegerType n))
+
+class Selectable (a :: Type Nat) (b :: Type Nat)
+instance Selectable (IntegerType 1) b
+instance Selectable (VectorType n (IntegerType 1)) (VectorType n b)
 
 class IsFloatTy (ty :: Type Nat)
 instance IsFloatTy (FloatingPointType bits format)
@@ -396,47 +380,47 @@ data Instruction a where
       atomicity :: LI.Atomicity,
       metadata :: LI.InstructionMetadata 
     } -> Instruction a
-  Trunc :: (SingI a, SmallerIntTy b a ~ True) => { 
+  Trunc :: (SingI a, SmallerIntTy b a) => { 
       operand :: Operand a,
       metadata :: LI.InstructionMetadata 
     } -> Instruction b
-  ZExt :: (SingI a, SmallerIntTy a b ~ True) => {
+  ZExt :: (SingI a, SmallerIntTy a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata 
     } -> Instruction b
-  SExt :: (SingI a, SmallerIntTy a b ~ True) => {
+  SExt :: (SingI a, SmallerIntTy a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  FPToUI :: (SingI a, IntFpCast b a ~ True ) => {
+  FPToUI :: (SingI a, IntFpCast b a) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  FPToSI :: (SingI a, IntFpCast b a ~ True ) => {
+  FPToSI :: (SingI a, IntFpCast b a) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  UIToFP :: (SingI a, IntFpCast a b ~ True ) => {
+  UIToFP :: (SingI a, IntFpCast a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  SIToFP :: (SingI a, IntFpCast a b ~ True ) => {
+  SIToFP :: (SingI a, IntFpCast a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  FPTrunc :: (SingI a, SmallerFloatTy b a ~ True) => {
+  FPTrunc :: (SingI a, SmallerFloatTy b a) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  FPExt :: (SingI a, SmallerFloatTy a b ~ True) => {
+  FPExt :: (SingI a, SmallerFloatTy a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  PtrToInt :: (SingI a, PtrIntCast a b ~ True) => {
+  PtrToInt :: (SingI a, PtrIntCast a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  IntToPtr :: (SingI a, PtrIntCast b a ~ True) => {
+  IntToPtr :: (SingI a, PtrIntCast b a) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
@@ -444,7 +428,7 @@ data Instruction a where
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  AddrSpaceCast :: (SingI a, PtrAddrSpaceDifferent a b ~ True) => {
+  AddrSpaceCast :: (SingI a, PtrAddrSpaceDifferent a b) => {
       operand :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
@@ -473,7 +457,7 @@ data Instruction a where
       functionAttributes :: [L.FunctionAttribute],
       metadata :: LI.InstructionMetadata
   } -> Instruction resType
-  Select :: (SingI a, Selectable a b ~ True) => { 
+  Select :: (SingI a, Selectable a b) => { 
       condition' :: Operand a,
       trueValue :: Operand b,
       falseValue :: Operand b,
