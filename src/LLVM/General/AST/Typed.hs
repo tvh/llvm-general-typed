@@ -23,8 +23,6 @@ import Data.Word
 
 import Data.HList
 
---import Data.Number.Binary
-
 import qualified LLVM.General.AST as L
 import qualified LLVM.General.AST.Linkage as L
 import qualified LLVM.General.AST.DataLayout as L
@@ -52,7 +50,8 @@ instance (ToUnTyped a b) => ToUnTyped (a,c) (b,c) where
 
 instance ToUnTyped (HList '[]) [b] where
   unTyped HNil = []
-instance (ToUnTyped (HList xs) [b], ToUnTyped a b) => ToUnTyped (HList (a ': xs)) [b] where
+instance (ToUnTyped (HList xs) [b], ToUnTyped a b)
+       => ToUnTyped (HList (a ': xs)) [b] where
   unTyped (HCons x xs) = unTyped x:unTyped xs
 
 data Vect (n::Nat) a where
@@ -72,22 +71,29 @@ data Type a
   = VoidType
   | IntegerType { typeBits :: a }
   | PointerType { pointerReferent :: Type a, pointerAddrSpace :: AddrSpace a }
-  | FloatingPointType { typeBits :: a, floatingPointFormat :: L.FloatingPointFormat }
-  | FunctionType { resultType :: Type a, argumentTypes :: [Type a], isVarArg :: Bool }
+  | FloatingPointType
+      { typeBits :: a, floatingPointFormat :: L.FloatingPointFormat }
+  | FunctionType
+      { resultType :: Type a, argumentTypes :: [Type a], isVarArg :: Bool }
   | VectorType { nVectorElements :: a, elementType :: Type a }
   | StructureType { isPacked :: Bool, elementTypes :: [Type a] }
   | ArrayType { nArrayElements :: a, elementType :: Type a }
   | MetadataType
-  
+
 instance ToUnTyped (Type Integer) L.Type where
   unTyped VoidType = L.VoidType
   unTyped IntegerType{..} = L.IntegerType $ fromInteger typeBits
-  unTyped PointerType{..} = L.PointerType (unTyped pointerReferent) (unTyped pointerAddrSpace)
-  unTyped FloatingPointType{..} = L.FloatingPointType (fromInteger typeBits) floatingPointFormat
-  unTyped FunctionType{..} = L.FunctionType (unTyped resultType) (unTyped argumentTypes) isVarArg
-  unTyped VectorType{..} = L.VectorType (fromInteger nVectorElements) (unTyped elementType)
+  unTyped PointerType{..} =
+    L.PointerType (unTyped pointerReferent) (unTyped pointerAddrSpace)
+  unTyped FloatingPointType{..} =
+    L.FloatingPointType (fromInteger typeBits) floatingPointFormat
+  unTyped FunctionType{..} =
+    L.FunctionType (unTyped resultType) (unTyped argumentTypes) isVarArg
+  unTyped VectorType{..} =
+    L.VectorType (fromInteger nVectorElements) (unTyped elementType)
   unTyped StructureType{..} = L.StructureType isPacked (unTyped elementTypes)
-  unTyped ArrayType{..} = L.ArrayType (fromInteger nArrayElements) (unTyped elementType)
+  unTyped ArrayType{..} =
+    L.ArrayType (fromInteger nArrayElements) (unTyped elementType)
   unTyped MetadataType = L.MetadataType
 
 genSingletons [
@@ -110,7 +116,8 @@ data Constant a where
   Float :: (a ~ FloatingPointType b c) => { floatValue :: SomeFloat a }
     -> Constant a
   Null :: Constant a
-  Struct :: (InnerTypes xs ~ a, ToUnTyped (HList xs) [LC.Constant]) => { structName :: Maybe L.Name, memberValuesS :: HList xs }
+  Struct :: (InnerTypes xs ~ a, ToUnTyped (HList xs) [LC.Constant])
+    => { structName :: Maybe L.Name, memberValuesS :: HList xs }
     -> Constant (StructureType packed a)
   Array :: SingI a => { memberValuesA :: Vect n (Constant a) }
     -> Constant (ArrayType n a)
@@ -127,7 +134,7 @@ instance SingI a => ToUnTyped (Constant a) LC.Constant where
   unTyped (Float x) =
     LC.Float $ case x of
       Single f -> LF.Single f
-      Double d -> LF.Double d      
+      Double d -> LF.Double d
   unTyped x@Null =
     LC.Null $ unTyped $ fromSing $ singByProxy x
   unTyped Struct{..} =
@@ -150,8 +157,11 @@ instance SingI a => ToUnTyped (Operand a) LO.Operand where
   unTyped (ConstantOperand c) = LO.ConstantOperand $ unTyped c
 
 data CallableOperand t where
-  Inline :: L.InlineAssembly -> CallableOperand (FunctionType resType argTypes varArg)
-  CallableOperand :: SingI (FunctionType resType argTypes varArg) => Operand (FunctionType resType argTypes varArg) -> CallableOperand (FunctionType resType argTypes varArg)
+  Inline :: L.InlineAssembly
+         -> CallableOperand (FunctionType resType argTypes varArg)
+  CallableOperand :: SingI (FunctionType resType argTypes varArg)
+                  => Operand (FunctionType resType argTypes varArg)
+                  -> CallableOperand (FunctionType resType argTypes varArg)
 
 instance ToUnTyped (CallableOperand t) LO.CallableOperand where
   unTyped (Inline inline) = Left inline
@@ -173,11 +183,11 @@ promoteOnly [d|
   fCmpRes :: Type Nat -> Type Nat
   fCmpRes FloatingPointType{} = IntegerType 1
   fCmpRes (VectorType n FloatingPointType{}) = VectorType n (IntegerType 1)
- 
+
   index :: [a] -> Nat -> a
   index (x:_) 0 = x
   index (_:xs) n = index xs (n - 1)
-  
+
   extractTy :: Type Nat -> [Nat] -> Type Nat
   extractTy t ns@(_:_) = extractTy' t ns
 
@@ -185,28 +195,37 @@ promoteOnly [d|
   extractTy' t [] = t
   extractTy' t (n:ns) =
     case t of
-      (ArrayType n1 t') -> if n1 > n then extractTy' t' ns else error "array out of bounds"
+      (ArrayType n1 t') -> if n1 > n
+                             then extractTy' t' ns
+                             else error "array out of bounds"
       (StructureType  _ ts) -> extractTy' (ts `index` n) ns
   |]
 
 class SmallerIntTy (a :: Type Nat) (b :: Type Nat)
 instance ((b1 :< b2) ~ True) => SmallerIntTy (IntegerType b1) (IntegerType b2)
-instance ((b1 :< b2) ~ True) => SmallerIntTy (VectorType n (IntegerType b1)) (VectorType n (IntegerType b2))
+instance ((b1 :< b2) ~ True) => SmallerIntTy (VectorType n (IntegerType b1))
+                                             (VectorType n (IntegerType b2))
 
 class SmallerFloatTy (a :: Type Nat) (b :: Type Nat)
-instance ((b1 :< b2) ~ True) => SmallerFloatTy (FloatingPointType b1 f1) (FloatingPointType b2 f2)
-instance ((b1 :< b2) ~ True) => SmallerFloatTy (VectorType n (FloatingPointType b1 f1)) (VectorType n (FloatingPointType b2 f2))
+instance ((b1 :< b2) ~ True) => SmallerFloatTy (FloatingPointType b1 f1)
+                                               (FloatingPointType b2 f2)
+instance ((b1 :< b2) ~ True)
+  => SmallerFloatTy (VectorType n (FloatingPointType b1 f1))
+                    (VectorType n (FloatingPointType b2 f2))
 
 class IntFpCast (a :: Type Nat) (b :: Type Nat)
 instance IntFpCast (IntegerType n1) (FloatingPointType n2 f)
-instance IntFpCast (VectorType n (IntegerType n1)) (VectorType n (FloatingPointType n2 f))
+instance IntFpCast (VectorType n (IntegerType n1))
+                   (VectorType n (FloatingPointType n2 f))
 
 class PtrAddrSpaceDifferent (a :: Type Nat) (b :: Type Nat)
-instance ((s1 :/= s2) ~ True) => PtrAddrSpaceDifferent (PointerType t s1) (PointerType t s2)
+instance ((s1 :/= s2) ~ True) => PtrAddrSpaceDifferent (PointerType t s1)
+                                                       (PointerType t s2)
 
 class PtrIntCast (a :: Type Nat) (b :: Type Nat)
 instance PtrIntCast (PointerType t s) (IntegerType n)
-instance PtrIntCast (VectorType n (PointerType t s)) (VectorType n2 (IntegerType n))
+instance PtrIntCast (VectorType n (PointerType t s))
+                    (VectorType n2 (IntegerType n))
 
 class Selectable (a :: Type Nat) (b :: Type Nat)
 instance Selectable (IntegerType 1) b
@@ -220,13 +239,16 @@ class IsIntTy (ty :: Type Nat)
 instance IsIntTy (IntegerType bits)
 instance IsIntTy (VectorType n (IntegerType bits))
 
-class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])] => ValidArgs (types :: [Type Nat]) (varArg :: Bool) (args :: [*])
+class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])]
+  => ValidArgs (types :: [Type Nat]) (varArg :: Bool) (args :: [*])
 instance ValidArgs '[] a '[]
-instance (SingI t, ValidArgs '[] True xs) => ValidArgs '[]        True   ((Operand t, [L.ParameterAttribute]) ': xs)
-instance (SingI t, ValidArgs ts varArg xs) => ValidArgs (t ': ts) varArg ((Operand t, [L.ParameterAttribute]) ': xs)
+instance (SingI t, ValidArgs '[] True xs)
+  => ValidArgs '[]        True   ((Operand t, [L.ParameterAttribute]) ': xs)
+instance (SingI t, ValidArgs ts varArg xs)
+  => ValidArgs (t ': ts) varArg ((Operand t, [L.ParameterAttribute]) ': xs)
 
 data Instruction a where
-  Add :: (IsIntTy a) => { 
+  Add :: (IsIntTy a) => {
       nsw :: Bool,
       nuw :: Bool,
       operand0 :: Operand a,
@@ -246,107 +268,107 @@ data Instruction a where
       operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FSub :: (IsFloatTy a) => { 
+  FSub :: (IsFloatTy a) => {
       fastMathFlags :: LI.FastMathFlags,
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Mul :: (IsIntTy a) => { 
-      nsw :: Bool, 
-      nuw :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
-      metadata :: LI.InstructionMetadata 
+  Mul :: (IsIntTy a) => {
+      nsw :: Bool,
+      nuw :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FMul :: (IsFloatTy a) => { 
+  FMul :: (IsFloatTy a) => {
       fastMathFlags :: LI.FastMathFlags,
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  UDiv :: (IsIntTy a) => { 
-      exact :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  UDiv :: (IsIntTy a) => {
+      exact :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  SDiv :: (IsIntTy a) => { 
-      exact :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  SDiv :: (IsIntTy a) => {
+      exact :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FDiv :: (IsFloatTy a) => { 
+  FDiv :: (IsFloatTy a) => {
       fastMathFlags :: LI.FastMathFlags,
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  URem :: (IsIntTy a) => { 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  URem :: (IsIntTy a) => {
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  SRem :: (IsIntTy a) => { 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  SRem :: (IsIntTy a) => {
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  FRem :: (IsFloatTy a) => { 
+  FRem :: (IsFloatTy a) => {
       fastMathFlags :: LI.FastMathFlags,
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Shl :: (IsIntTy a) => { 
-      nsw :: Bool, 
-      nuw :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  Shl :: (IsIntTy a) => {
+      nsw :: Bool,
+      nuw :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  LShr :: (IsIntTy a) => { 
-      exact :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  LShr :: (IsIntTy a) => {
+      exact :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  AShr :: (IsIntTy a) => { 
-      exact :: Bool, 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  AShr :: (IsIntTy a) => {
+      exact :: Bool,
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  And :: (IsIntTy a) => { 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  And :: (IsIntTy a) => {
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Or :: (IsIntTy a) => { 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  Or :: (IsIntTy a) => {
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Xor :: (IsIntTy a) => { 
-      operand0 :: Operand a, 
-      operand1 :: Operand a, 
+  Xor :: (IsIntTy a) => {
+      operand0 :: Operand a,
+      operand1 :: Operand a,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Alloca :: (SingI a) => { 
+  Alloca :: (SingI a) => {
       numElements :: Maybe (Operand (IntegerType a)),
       alignmentA :: Word32,
       metadataAlloca :: LI.InstructionMetadata
     } -> Instruction (PointerType ty addrspace)
   Load :: SingI addrspace => {
-      volatile :: Bool, 
+      volatile :: Bool,
       addressLoad :: Operand (PointerType a addrspace),
       maybeAtomicityLoad :: Maybe LI.Atomicity,
       alignmentL :: Word32,
       metadata :: LI.InstructionMetadata
     } -> Instruction a
   Store :: (SingI addrspace, SingI a) => {
-      volatile' :: Bool, 
+      volatile' :: Bool,
       addressStore :: Operand (PointerType a addrspace),
       value :: Operand a,
       maybeAtomicityStore :: Maybe LI.Atomicity,
@@ -354,39 +376,39 @@ data Instruction a where
       metadataVoid :: LI.InstructionMetadata
     } -> Instruction VoidType
   -- TODO: unify types
-  GetElementPtr :: (SingI s, SingI a, ToUnTyped (HList idxs) [LO.Operand]) => { 
+  GetElementPtr :: (SingI s, SingI a, ToUnTyped (HList idxs) [LO.Operand]) => {
       inBounds :: Bool,
       addressG :: Operand (PointerType a s),
       indices :: HList idxs,
       metadataG :: LI.InstructionMetadata
     } -> Instruction (PointerType b s)
-  Fence :: { 
+  Fence :: {
       atomicityF :: LI.Atomicity,
-      metadataVoid :: LI.InstructionMetadata 
+      metadataVoid :: LI.InstructionMetadata
     } -> Instruction VoidType
-  CmpXchg :: (SingI addrspace) => { 
+  CmpXchg :: (SingI addrspace) => {
       volatileC :: Bool,
       address :: Operand (PointerType a addrspace),
       expected :: Operand a,
       replacement :: Operand a,
       atomicity :: LI.Atomicity,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
-  AtomicRMW :: (SingI addrspace) => { 
+  AtomicRMW :: (SingI addrspace) => {
       volatile :: Bool,
       rmwOperation :: LR.RMWOperation,
       address :: Operand (PointerType a addrspace),
       value' :: Operand a,
       atomicity :: LI.Atomicity,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
-  Trunc :: (SingI a, SmallerIntTy b a) => { 
+  Trunc :: (SingI a, SmallerIntTy b a) => {
       operand :: Operand a,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction b
   ZExt :: (SingI a, SmallerIntTy a b) => {
       operand :: Operand a,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction b
   SExt :: (SingI a, SmallerIntTy a b) => {
       operand :: Operand a,
@@ -457,42 +479,42 @@ data Instruction a where
       functionAttributes :: [L.FunctionAttribute],
       metadata :: LI.InstructionMetadata
   } -> Instruction resType
-  Select :: (SingI a, Selectable a b) => { 
+  Select :: (SingI a, Selectable a b) => {
       condition' :: Operand a,
       trueValue :: Operand b,
       falseValue :: Operand b,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
 {-
-  VAArg :: { 
+  VAArg :: {
       argList :: Operand,
       type' :: Type,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
 -}
-  ExtractElement :: (SingI n, SingI b, IsIntTy b) => { 
+  ExtractElement :: (SingI n, SingI b, IsIntTy b) => {
       vectorExtract :: Operand (VectorType n a),
       indexExtract :: Operand b,
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
-  InsertElement :: (SingI a, SingI b, IsIntTy b) => { 
+  InsertElement :: (SingI a, SingI b, IsIntTy b) => {
       vectorInsert :: Operand (VectorType n a),
       elementE :: Operand a,
       indexInsert :: Operand b,
       metadataVect :: LI.InstructionMetadata
     } -> Instruction (VectorType n a)
-  ShuffleVector :: (SingI a, SingI n, SingI m) => { 
+  ShuffleVector :: (SingI a, SingI n, SingI m) => {
       operand0'' :: Operand (VectorType n a),
       operand1'' :: Operand (VectorType n a),
       mask :: Constant (VectorType m (IntegerType 32)),
       metadataVect :: LI.InstructionMetadata
     } -> Instruction (VectorType m a)
-  ExtractValue :: (SingI a, SingI idxs, ExtractTy a idxs ~ b) => { 
+  ExtractValue :: (SingI a, SingI idxs, ExtractTy a idxs ~ b) => {
       aggregateE :: Operand a,
       indices' :: Proxy idxs,
       metadata :: LI.InstructionMetadata
     } -> Instruction b
-  InsertValue :: (SingI b, SingI idxs, ExtractTy a idxs ~ b) => { 
+  InsertValue :: (SingI b, SingI idxs, ExtractTy a idxs ~ b) => {
       aggregateV :: Operand a,
       elementV :: Operand b,
       indices' :: Proxy idxs,
@@ -503,7 +525,7 @@ data Instruction a where
       personalityFunction :: Operand,
       cleanup :: Bool,
       clauses :: [LandingPadClause],
-      metadata :: LI.InstructionMetadata 
+      metadata :: LI.InstructionMetadata
     } -> Instruction a
 -}
 
@@ -592,17 +614,17 @@ instance SingI a => ToUnTyped (Instruction a) LI.Instruction where
     in LI.InsertValue (unTyped aggregateV) (unTyped elementV) (map fromInteger idxs) metadata
 
 data Terminator a where
-  Ret :: (SingI a) => { 
+  Ret :: (SingI a) => {
       returnOperand :: Maybe (Operand a),
       metadata' :: LI.InstructionMetadata
     } -> Terminator VoidType
-  CondBr :: (SingI a) => { 
-      condition :: Operand a, 
-      trueDest :: L.Name, 
+  CondBr :: (SingI a) => {
+      condition :: Operand a,
+      trueDest :: L.Name,
       falseDest :: L.Name,
       metadata' :: LI.InstructionMetadata
     } -> Terminator VoidType
-  Br :: { 
+  Br :: {
       dest :: L.Name,
       metadata' :: LI.InstructionMetadata
     } -> Terminator VoidType
@@ -643,12 +665,12 @@ instance ToUnTyped (Terminator a) LI.Terminator where
   unTyped IndirectBr{..} = LI.IndirectBr (unTyped operand') possibleDests metadata'
   unTyped Invoke{..} = LI.Invoke callingConvention' returnAttributes' (unTyped function') (unTyped arguments') functionAttributes' returnDest exceptionDest metadata''
   unTyped Resume{..} = LI.Resume (unTyped operand') metadata'
-  unTyped Unreachable{..} = LI.Unreachable metadata'  
+  unTyped Unreachable{..} = LI.Unreachable metadata'
 
 instance Functor LI.Named where
   fmap f (LI.Do x)   = LI.Do (f x)
   fmap f (n LI.:= x) = n LI.:= (f x)
-  
+
 data BasicBlock where
   BasicBlock :: (ToUnTyped (HList xs) [LI.Named LI.Instruction]) => {
     blockName :: L.Name,
@@ -730,13 +752,13 @@ instance ToUnTyped Definition L.Definition where
   unTyped (NamedMetadataDefinition name ids) = L.NamedMetadataDefinition name ids
   unTyped (ModuleInlineAssembly assembly) = L.ModuleInlineAssembly assembly
 
-data Module = 
+data Module =
   Module {
     moduleName :: String,
     moduleDataLayout :: Maybe L.DataLayout,
     moduleTargetTriple :: Maybe String,
     moduleDefinitions :: [Definition]
-  } 
+  }
 
 instance ToUnTyped Module L.Module where
   unTyped Module{..} = L.Module moduleName moduleDataLayout moduleTargetTriple (unTyped moduleDefinitions)
