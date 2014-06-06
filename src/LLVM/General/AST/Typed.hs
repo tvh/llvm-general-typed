@@ -110,6 +110,11 @@ type family InnerTypes a where
   InnerTypes '[] = '[]
   InnerTypes (c a ': xs) = a ': InnerTypes xs
 
+class SingI t => PrimitiveType (t :: Type Nat)
+instance PrimitiveType VoidType
+instance KnownNat n => PrimitiveType (IntegerType n)
+instance (KnownNat n, SingI f) => PrimitiveType (FloatingPointType n f)
+
 data Constant a where
   Int :: { integerValue :: Integer }
     -> Constant (IntegerType n)
@@ -121,7 +126,7 @@ data Constant a where
     -> Constant (StructureType packed a)
   Array :: SingI a => { memberValuesA :: Vect n (Constant a) }
     -> Constant (ArrayType n a)
-  Vector :: SingI a => { memberValuesV :: Vect n (Constant a) }
+  Vector :: PrimitiveType a => { memberValuesV :: Vect n (Constant a) }
     -> Constant (VectorType n a)
   Undef :: Constant a
   GlobalReference :: L.Name
@@ -239,13 +244,10 @@ class IsIntTy (ty :: Type Nat)
 instance IsIntTy (IntegerType bits)
 instance IsIntTy (VectorType n (IntegerType bits))
 
-class ToUnTyped (HList args) [(LO.Operand, [L.ParameterAttribute])]
-  => ValidArgs (types :: [Type Nat]) (varArg :: Bool) (args :: [*])
-instance ValidArgs '[] a '[]
-instance (SingI t, ValidArgs '[] True xs)
-  => ValidArgs '[]        True   ((Operand t, [L.ParameterAttribute]) ': xs)
-instance (SingI t, ValidArgs ts varArg xs)
-  => ValidArgs (t ': ts) varArg ((Operand t, [L.ParameterAttribute]) ': xs)
+data NoType tyConstr unTy where
+  NoType :: ToUnTyped (tyConstr a) unTy => tyConstr a -> NoType tyConstr unTy
+instance ToUnTyped (NoType tyConstr unTy) unTy where
+  unTyped (NoType x) = unTyped x
 
 data Instruction a where
   Add :: (IsIntTy a) => {
@@ -470,12 +472,12 @@ data Instruction a where
       incomingValues :: [ (Operand a, L.Name) ],
       metadata :: LI.InstructionMetadata
   } -> Instruction a
-  Call :: (ValidArgs argTypes varArg args) => {
+  Call :: {
       isTailCall :: Bool,
       callingConvention :: L.CallingConvention,
       returnAttributes :: [L.ParameterAttribute],
       function :: CallableOperand (FunctionType resType argTypes varArg),
-      arguments :: HList args,
+      arguments :: [(NoType Operand LO.Operand, [L.ParameterAttribute])],
       functionAttributes :: [L.FunctionAttribute],
       metadata :: LI.InstructionMetadata
   } -> Instruction resType
@@ -639,11 +641,11 @@ data Terminator a where
       possibleDests :: [L.Name],
       metadata' :: LI.InstructionMetadata
     } -> Terminator VoidType
-  Invoke :: (ValidArgs argTypes varArg args) => {
+  Invoke :: {
       callingConvention' :: L.CallingConvention,
       returnAttributes' :: [L.ParameterAttribute],
       function' :: CallableOperand (FunctionType resType argTypes varArg),
-      arguments' :: HList args,
+      arguments' :: [(NoType Operand LO.Operand, [L.ParameterAttribute])],
       functionAttributes' :: [L.FunctionAttribute],
       returnDest :: L.Name,
       exceptionDest :: L.Name,
@@ -681,19 +683,18 @@ data BasicBlock where
 instance ToUnTyped BasicBlock L.BasicBlock where
   unTyped BasicBlock{..} = L.BasicBlock blockName (unTyped blockInstructions) (unTyped blockTerminator)
 
-data Parameter (a :: Type Nat) where
-  Parameter :: (SingI a) => {
+data Parameter where
+  Parameter :: {
+    parameterType :: Type Integer,
     parameterName :: L.Name,
     parameterAttributes :: [L.ParameterAttribute]
-  } -> Parameter a
+  } -> Parameter
 
-instance ToUnTyped (Parameter a) L.Parameter where
-  unTyped x@Parameter{..} =
-    let t = fromSing $ singByProxy x
-    in L.Parameter (unTyped t) parameterName parameterAttributes
+instance ToUnTyped Parameter L.Parameter where
+  unTyped Parameter{..} = L.Parameter (unTyped parameterType) parameterName parameterAttributes
 
-data Global (a :: Type Nat) where
-  GlobalVariable :: SingI a => {
+data Global where
+  GlobalVariable :: {
     name :: L.Name,
     linkage :: L.Linkage,
     visibility :: L.Visibility,
@@ -701,43 +702,42 @@ data Global (a :: Type Nat) where
     addrSpace :: AddrSpace Word32,
     hasUnnamedAddr :: Bool,
     isConstant :: Bool,
-    initializer :: Maybe (Constant a),
+    type' :: Type Integer,
+    initializer :: Maybe (NoType Constant LC.Constant),
     section :: Maybe String,
     globalAlignment :: Word32
-  } -> Global a
-  GlobalAlias :: SingI a => {
+  } -> Global
+  GlobalAlias :: {
     name :: L.Name,
     linkage :: L.Linkage,
     visibility :: L.Visibility,
-    aliasee :: Constant a
-  } -> Global a
-  Function :: (ToUnTyped (HList params) [L.Parameter], InnerTypes params ~ args) => {
+    type' :: Type Integer,
+    aliasee :: NoType Constant LC.Constant
+  } -> Global
+  Function :: {
     linkage' :: L.Linkage,
     visibility' :: L.Visibility,
     callingConventionF :: L.CallingConvention,
     returnAttributesF :: [L.ParameterAttribute],
+    returnType :: Type Integer,
     name' :: L.Name,
-    parameters :: HList params,
+    parameters :: ([Parameter], Bool),
     functionAttributesF :: [L.FunctionAttribute],
     section' :: Maybe String,
     globalAlignment' :: Word32,
     garbageCollectorName :: Maybe String,
     basicBlocks :: [BasicBlock]
-  } -> Global (FunctionType a args varArg)
+  } -> Global
 
-instance SingI a => ToUnTyped (Global a) L.Global where
-  unTyped x@GlobalVariable{..} =
-    let t = fromSing $ singByProxy x
-    in L.GlobalVariable name linkage visibility isThreadLocal (unTyped addrSpace) hasUnnamedAddr isConstant (unTyped t) (unTyped initializer) section globalAlignment
-  unTyped x@GlobalAlias{..} =
-    let t = fromSing $ singByProxy x
-    in L.GlobalAlias name linkage visibility (unTyped t) (unTyped aliasee)
-  unTyped x@Function{..} =
-    let FunctionType retType _ varArg = fromSing $ singByProxy x
-    in L.Function linkage' visibility' callingConventionF returnAttributesF (unTyped retType) name' (unTyped parameters, varArg) functionAttributesF section' globalAlignment' garbageCollectorName (unTyped basicBlocks)
+instance ToUnTyped Global L.Global where
+  unTyped GlobalVariable{..} = L.GlobalVariable name linkage visibility isThreadLocal (unTyped addrSpace) hasUnnamedAddr isConstant (unTyped type') (unTyped initializer) section globalAlignment
+  unTyped GlobalAlias{..} = L.GlobalAlias name linkage visibility (unTyped type') (unTyped aliasee)
+  unTyped Function{..} =
+    let (parameters', varArg) = parameters
+    in L.Function linkage' visibility' callingConventionF returnAttributesF (unTyped returnType) name' (unTyped parameters', varArg) functionAttributesF section' globalAlignment' garbageCollectorName (unTyped basicBlocks)
 
 -- | helper for making 'GlobalVariable's
-globalVariableDefaults :: SingI a => Global a
+globalVariableDefaults :: Global
 globalVariableDefaults =
   GlobalVariable {
   name = error "global variable name not defined",
@@ -747,36 +747,34 @@ globalVariableDefaults =
   addrSpace = AddrSpace 0,
   hasUnnamedAddr = False,
   isConstant = False,
+  type' = error "global variable type not defined",
   initializer = Nothing,
   section = Nothing,
   globalAlignment = 0
   }
 
 -- | helper for making 'GlobalAlias's
-globalAliasDefaults :: SingI a => Global a
+globalAliasDefaults :: Global
 globalAliasDefaults =
   GlobalAlias {
     name = error "global alias name not defined",
     linkage = L.External,
     visibility = L.Default,
+    type' = error "global variable type not defined",
     aliasee = error "global alias aliasee not defined"
   }
 
 -- | helper for making 'Function's
-functionDefaults
-  :: forall a params args varArg. (
-    params ~ '[]
-  , ToUnTyped (HList params) [L.Parameter]
-  , InnerTypes params ~ args
-  ) => Global (FunctionType a args varArg)
+functionDefaults :: Global
 functionDefaults =
   Function {
     linkage' = L.External,
     visibility' = L.Default,
     callingConventionF = L.C,
     returnAttributesF = [],
+    returnType = error "function return type not defined",
     name' = error "function name not defined",
-    parameters = HNil,
+    parameters = ([],False),
     functionAttributesF = [],
     section' = Nothing,
     globalAlignment' = 0,
@@ -785,17 +783,15 @@ functionDefaults =
   }
 
 data Definition where
-  GlobalDefinition :: ToUnTyped (Global a) L.Global => Global a -> Definition
-  TypeDefinition :: (SingI a) => L.Name -> Proxy (a :: Maybe (Type Nat)) -> Definition
+  GlobalDefinition :: Global -> Definition
+  TypeDefinition :: L.Name -> Maybe (Type Integer) -> Definition
   MetadataNodeDefinition :: ToUnTyped (HList defs) [Maybe LO.Operand] => LO.MetadataNodeID -> HList defs -> Definition
   NamedMetadataDefinition :: String -> [LO.MetadataNodeID] -> Definition
   ModuleInlineAssembly :: String -> Definition
 
 instance ToUnTyped Definition L.Definition where
   unTyped (GlobalDefinition g) = L.GlobalDefinition (unTyped g)
-  unTyped (TypeDefinition name t) =
-    let mTy = fromSing $ singByProxy t
-    in L.TypeDefinition name (unTyped mTy)
+  unTyped (TypeDefinition name t) = L.TypeDefinition name (unTyped t)
   unTyped (MetadataNodeDefinition nodeId defs) = L.MetadataNodeDefinition nodeId (unTyped defs)
   unTyped (NamedMetadataDefinition name ids) = L.NamedMetadataDefinition name ids
   unTyped (ModuleInlineAssembly assembly) = L.ModuleInlineAssembly assembly
